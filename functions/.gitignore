@@ -1,0 +1,22 @@
+*.local
+*.json
+!requirements.json
+
+# Secrets & Credentials
+*.json
+*.env
+*api_key*
+
+# Config secrets (keep template, ignore actual secrets)
+config/secrets.json
+!config/secrets.template.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
