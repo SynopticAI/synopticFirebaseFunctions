@@ -42,6 +42,26 @@ import math
 # Own imports
 from config.loader import get_openai_api_key, get_anthropic_api_key
 
+# NOT USING THESE REFACTORED VERSIONS YET !!!
+# # Import utility functions
+# from utils.notification_utils  import (
+#     # Notification functions
+#     DetectionPoint,
+#     DetectionBox,
+#     NotificationTrigger,
+#     extract_detections_from_inference,
+#     trigger_action,
+# )
+# from utils.data_processing_utils import (
+#     # Data processing functions
+#     add_cors_headers,
+#     extract_metrics_from_inference,
+#     update_credit_usage,
+#     save_inference_output,
+#     _parse_image_request
+# )
+# NOT USING THESE REFACTORED VERSIONS YET !!!
+
 #openai.api_key = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(
   api_key=get_openai_api_key()
