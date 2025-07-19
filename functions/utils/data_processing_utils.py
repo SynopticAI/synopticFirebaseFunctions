@@ -10,6 +10,9 @@ from firebase_functions import logger
 from firebase_admin import firestore, storage
 from flask import Request, jsonify
 
+# Import trigger_action at module level to avoid circular import issues
+from .notification_utils import trigger_action
+
 def add_cors_headers(response):
     """Add CORS headers to the response.
     
@@ -438,7 +441,6 @@ def save_inference_output(user_id: str, device_id: str, inference_result: dict, 
     Enhanced version that properly triggers notifications and tracks credit usage.
     """
     try:
-        from .notification_utils import trigger_action
         
         db = firestore.client()
         current_time = int(time.time() * 1000)

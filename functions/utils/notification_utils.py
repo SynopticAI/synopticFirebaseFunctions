@@ -207,7 +207,7 @@ def check_location_trigger(class_name: str, detections: List[DetectionPoint], re
         logger.error(f"Error checking location trigger for {class_name}: {str(e)}")
         return False, []
 
-async def send_notification(trigger: NotificationTrigger) -> bool:
+def send_notification(trigger: NotificationTrigger) -> bool:
     """Send FCM notification only to devices that have enabled notifications for this camera."""
     try:
         db = firestore.client()
@@ -395,7 +395,7 @@ def trigger_action(user_id: str, device_id: str, inference_result: dict, class_m
                     )
                     
                     # Send notification
-                    success = asyncio.run(send_notification(trigger))
+                    success = send_notification(trigger)
                     if success:
                         triggered_notifications.append(trigger)
                         
