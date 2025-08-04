@@ -1011,39 +1011,79 @@ def update_device_settings(user_id: str, device_id: str, settings: dict) -> bool
         logger.error(f"Error updating settings: {str(e)}")
         return False
 
+# ---------------------------
+# 3. Actual Assistant Chat Function
+# ---------------------------
 
 # Simplified Gemini-based assistant_chat function
 # Replace the existing assistant_chat function in main.py with this
 
-from google import genai
+import google.genai as genai
 from google.genai import types
 import json
 import re
 from firebase_functions import https_fn, logger
 from firebase_admin import firestore, storage
 from flask import Request, jsonify
+import base64
 from PIL import Image
 import io
-import requests
 
-
-# Simplified function definitions for Gemini - using explicit declarations
-def createDeviceIcon(iconRequest: str) -> str:
-    """Generate a custom device icon based on task description"""
-    return f"I'll create an icon for: {iconRequest}"
-
-def setClasses(classes: list, classDescriptions: list = None) -> str:
-    """Define classification classes and their descriptions"""
-    if classDescriptions is None:
-        classDescriptions = []
-    return f"I'll set up these classes: {', '.join(classes)}"
-
-def updateSettings(settings: dict) -> str:
-    """Update device settings"""
-    return f"I'll update these settings: {', '.join(settings.keys())}"
-
-# Tool functions that Gemini can call
-GEMINI_TOOLS = [createDeviceIcon, setClasses, updateSettings]
+# Simplified tool definitions for Gemini
+GEMINI_TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "createDeviceIcon",
+                "description": "Generate a custom device icon based on task description",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "iconRequest": {
+                            "type": "STRING",
+                            "description": "Description of the device task for icon generation"
+                        }
+                    },
+                    "required": ["iconRequest"]
+                }
+            },
+            {
+                "name": "setClasses",
+                "description": "Define classification classes and their descriptions",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "classes": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": "List of class names"
+                        },
+                        "classDescriptions": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": "List of descriptions for each class (optional, defaults to empty descriptions)"
+                        }
+                    },
+                    "required": ["classes"]
+                }
+            },
+            {
+                "name": "updateSettings",
+                "description": "Update device settings",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "settings": {
+                            "type": "OBJECT",
+                            "description": "Key-value pairs of settings to update"
+                        }
+                    },
+                    "required": ["settings"]
+                }
+            }
+        ]
+    }
+]
 
 def build_system_prompt(device_data: dict, setup_stage: float, user_language: str) -> str:
     """Build a concise system prompt for Gemini"""
@@ -1081,20 +1121,20 @@ You can call multiple functions simultaneously. Always provide a helpful respons
 
 Never modify these protected settings: status, connectedCameraId, last_heartbeat, iconAlreadyCreated, deletionStarted"""
 
-def execute_actual_function(func_name: str, func_args: dict, user_id: str, device_id: str, message_timestamp: str) -> dict:
-    """Execute the actual backend function calls"""
+def execute_function_call(func_name: str, func_args: dict, user_id: str, device_id: str, message_timestamp: str, call_index: int = 1) -> dict:
+    """Execute a function call and return the result"""
+    
+    # Create unique timestamp for this action if there are multiple calls
+    action_timestamp = f"{message_timestamp}_{call_index}" if call_index > 1 else message_timestamp
     
     if func_name == "createDeviceIcon":
         return process_create_device_icon(
             user_id, device_id, 
             func_args.get("iconRequest", ""), 
-            message_timestamp
+            action_timestamp
         )
     
     elif func_name == "setClasses":
-        # Create unique timestamp for this action
-        action_timestamp = f"{message_timestamp}_{func_name}"
-        
         set_classes_url = "https://europe-west4-aimanagerfirebasebackend.cloudfunctions.net/set_classes"
         payload = {
             "user_id": user_id,
@@ -1104,6 +1144,7 @@ def execute_actual_function(func_name: str, func_args: dict, user_id: str, devic
             "messageTimestamp": action_timestamp
         }
         
+        import requests
         response = requests.post(set_classes_url, json=payload)
         
         if response.status_code == 200:
@@ -1123,11 +1164,16 @@ def execute_actual_function(func_name: str, func_args: dict, user_id: str, devic
         success = update_device_settings(user_id, device_id, func_args.get("settings", {}))
         return {
             "status": "success" if success else "error",
-            "message": "Settings updated" if success else "Failed to update settings"
+            "message": "Settings updated" if success else "Failed to update settings",
+            "timestamp": action_timestamp
         }
     
     else:
-        return {"status": "error", "message": f"Unknown function: {func_name}"}
+        return {
+            "status": "error", 
+            "message": f"Unknown function: {func_name}",
+            "timestamp": action_timestamp
+        }
 
 @https_fn.on_request(region="europe-west4")
 def assistant_chat(request: Request):
@@ -1165,8 +1211,8 @@ def assistant_chat(request: Request):
         # Build system prompt
         system_prompt = build_system_prompt(device_data, setup_stage, user_language)
         
-        # Prepare content for Gemini
-        contents = []
+        # Prepare message content
+        contents = [system_prompt, user_message]
         
         # Handle image attachments
         image_timestamps = request_json.get("imageTimestamps", [])
@@ -1187,44 +1233,46 @@ def assistant_chat(request: Request):
                 except Exception as e:
                     logger.error(f"Error processing image {timestamp}: {str(e)}")
         
-        # Add text message
-        contents.append(user_message)
-
-        # Initialize Gemini client
+        # Create Gemini client and generate response
         client = genai.Client(api_key=get_gemini_api_key())
         
-        # Generate response with function calling disabled for manual control
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model='models/gemini-2.0-flash-exp',
             contents=contents,
             config=types.GenerateContentConfig(
                 tools=GEMINI_TOOLS,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                system_instruction=system_prompt,
                 temperature=0.7,
                 max_output_tokens=2048,
             )
         )
         
-        # Process response parts
+        # Process response
         assistant_reply = ""
         actions = []
+        function_call_counter = 0
         
-        for part in response.parts:
-            if part.text:
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'text') and part.text:
                 assistant_reply += part.text
             elif hasattr(part, 'function_call') and part.function_call:
-                # Handle function call manually 
-                func_name = part.function_call.name
-                func_args = dict(part.function_call.args) if part.function_call.args else {}
+                function_call_counter += 1
                 
-                # Execute the actual function
-                action_result = execute_actual_function(func_name, func_args, user_id, device_id, message_timestamp)
+                # Execute function call
+                func_result = execute_function_call(
+                    part.function_call.name,
+                    dict(part.function_call.args),
+                    user_id,
+                    device_id,
+                    message_timestamp,
+                    function_call_counter
+                )
                 
+                # Create action entry for frontend
+                action_timestamp = func_result.get("timestamp", message_timestamp)
                 actions.append({
-                    "tool": func_name,
-                    "timestamp": action_result.get("timestamp", message_timestamp),
-                    "result": action_result
+                    "tool": part.function_call.name,
+                    "timestamp": action_timestamp,
+                    "result": func_result
                 })
         
         # Build response
