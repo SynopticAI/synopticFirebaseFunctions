@@ -1,4 +1,4 @@
-# utils/__init__.py
+# utils/__init__.py - Updated imports
 
 # Import notification utilities
 from .notification_utils import (
@@ -13,7 +13,7 @@ from .notification_utils import (
     trigger_action
 )
 
-# Import data processing utilities
+# Import data processing utilities (simplified)
 from .data_processing_utils import (
     add_cors_headers,
     create_model_output,
@@ -22,7 +22,10 @@ from .data_processing_utils import (
     extract_metrics_from_inference,
     update_credit_usage,
     save_inference_output,
-    _parse_image_request
+    _parse_image_request,
+    get_inference_similarity_threshold,
+    get_similarity_system_settings,
+    get_basic_processing_stats
 )
 
 __all__ = [
@@ -37,7 +40,7 @@ __all__ = [
     'send_notification',
     'trigger_action',
     
-    # Data processing utilities
+    # Data processing utilities (simplified)
     'add_cors_headers',
     'create_model_output',
     'update_inference_aggregations',
@@ -45,5 +48,8 @@ __all__ = [
     'extract_metrics_from_inference',
     'update_credit_usage',
     'save_inference_output',
-    '_parse_image_request'
+    '_parse_image_request',
+    'get_inference_similarity_threshold',
+    'get_similarity_system_settings',
+    'get_basic_processing_stats'
 ]

@@ -55,7 +55,7 @@ Return as a JSON array. If no objects are found, return an empty array.
             contents=[img, prompt],  # Image before text as recommended by Google
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",  # Force structured JSON response
-                thinking_config=types.ThinkingConfig(thinking_budget=0)  # Try 0 instead of -1
+                thinking_config=types.ThinkingConfig(thinking_budget=-1)  # Try 0 instead of -1
             )
         )
 

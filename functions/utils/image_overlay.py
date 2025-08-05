@@ -4,6 +4,64 @@ import math
 from typing import List, Dict, Any, Tuple, Optional
 from firebase_functions import logger
 
+class ConsistentColorManager:
+    """
+    Manages consistent color assignment matching Flutter frontend exactly.
+    Colors should match device_dashboard_page.dart color scheme.
+    """
+    
+    # Match the exact colors from Flutter - converted to RGB
+    FLUTTER_DASHBOARD_COLORS = [
+        (33, 150, 243),   # Colors.blue
+        (244, 67, 54),    # Colors.red  
+        (76, 175, 80),    # Colors.green
+        (255, 152, 0),    # Colors.orange
+        (156, 39, 176),   # Colors.purple
+        (0, 150, 136),    # Colors.teal
+        (63, 81, 181),    # Colors.indigo
+        (233, 30, 99),    # Colors.pink
+        (255, 193, 7),    # Colors.amber
+        (0, 188, 212),    # Colors.cyan
+    ]
+    
+    # Global class-to-color mapping for consistency across all function calls
+    _global_class_colors = {}
+    
+    @classmethod
+    def get_class_color(cls, class_name: str, all_classes: list = None) -> Tuple[int, int, int]:
+        """
+        Get consistent color for a class name.
+        Colors are assigned in the order classes are first encountered,
+        matching the Flutter dashboard behavior.
+        """
+        if class_name in cls._global_class_colors:
+            return cls._global_class_colors[class_name]
+        
+        # If we have a list of all classes, use deterministic ordering
+        if all_classes:
+            # Sort classes for deterministic color assignment
+            sorted_classes = sorted(set(all_classes))
+            
+            # Assign colors to any new classes in the sorted list
+            for i, sorted_class in enumerate(sorted_classes):
+                if sorted_class not in cls._global_class_colors:
+                    color_index = i % len(cls.FLUTTER_DASHBOARD_COLORS)
+                    cls._global_class_colors[sorted_class] = cls.FLUTTER_DASHBOARD_COLORS[color_index]
+            
+            return cls._global_class_colors.get(class_name, cls.FLUTTER_DASHBOARD_COLORS[0])
+        
+        # Fallback: assign next available color
+        current_color_count = len(cls._global_class_colors)
+        color_index = current_color_count % len(cls.FLUTTER_DASHBOARD_COLORS)
+        color = cls.FLUTTER_DASHBOARD_COLORS[color_index]
+        cls._global_class_colors[class_name] = color
+        
+        return color
+    
+    @classmethod
+    def reset_colors(cls):
+        """Reset color assignments (useful for testing)"""
+        cls._global_class_colors.clear()
 
 class ImageOverlayProcessor:
     """
@@ -64,35 +122,18 @@ class ImageOverlayProcessor:
     @staticmethod
     def draw_bounding_boxes(image_bytes: bytes, objects: List[Dict[str, Any]], 
                            image_size: Tuple[int, int] = (1024, 1024)) -> bytes:
-        """
-        Draw bounding boxes on image matching the Flutter BoundingBoxPainter implementation.
-        
-        Args:
-            image_bytes: Original image as bytes
-            objects: List of detected objects with bbox, class, and score
-            image_size: Coordinate system size (default 1024x1024)
-            
-        Returns:
-            Image bytes with bounding boxes drawn
-        """
+        """Draw bounding boxes with consistent Flutter colors"""
         try:
             if not objects:
-                logger.info("No objects to draw, returning original image")
                 return image_bytes
                 
-            # Open and prepare image
             image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-            original_size = image.size
             draw = ImageDraw.Draw(image)
-            
-            # Load font
             font = ImageOverlayProcessor.load_font(14)
             small_font = ImageOverlayProcessor.load_font(12)
             
-            # Class color mapping for consistency
-            class_color_map = {}
-            
-            logger.info(f"Drawing {len(objects)} bounding boxes on {original_size} image")
+            # Extract all class names for consistent color assignment
+            all_classes = [obj.get('class', f'Object_{i}') for i, obj in enumerate(objects)]
             
             for i, obj in enumerate(objects):
                 try:
@@ -100,291 +141,150 @@ class ImageOverlayProcessor:
                     class_name = obj.get('class', f'Object_{i}')
                     score = obj.get('score', 0.0)
                     
-                    # Get coordinates (expected to be in image_size coordinate system)
-                    x1 = float(bbox.get('x1', 0))
-                    y1 = float(bbox.get('y1', 0))
-                    x2 = float(bbox.get('x2', 0))
-                    y2 = float(bbox.get('y2', 0))
-                    
-                    # Validate coordinates
+                    # Get coordinates and validate
+                    x1, y1, x2, y2 = bbox.get('x1', 0), bbox.get('y1', 0), bbox.get('x2', 0), bbox.get('y2', 0)
                     if x1 >= x2 or y1 >= y2:
-                        logger.info(f"Invalid bounding box coordinates for {class_name}: ({x1},{y1}) to ({x2},{y2})")
                         continue
                     
-                    # Scale coordinates to actual image size
-                    # Use minimum scaling factor to preserve aspect ratio
-                    scale_factor = min(
-                        original_size[0] / image_size[0], 
-                        original_size[1] / image_size[1]
-                    )
-                    
-                    # Center the content on the image
+                    # Scale coordinates to image size
+                    original_size = image.size
+                    scale_factor = min(original_size[0] / image_size[0], original_size[1] / image_size[1])
                     x_offset = (original_size[0] - image_size[0] * scale_factor) / 2
                     y_offset = (original_size[1] - image_size[1] * scale_factor) / 2
                     
-                    # Apply scaling and centering
-                    scaled_x1 = x1 * scale_factor + x_offset
-                    scaled_y1 = y1 * scale_factor + y_offset
-                    scaled_x2 = x2 * scale_factor + x_offset
-                    scaled_y2 = y2 * scale_factor + y_offset
+                    scaled_x1 = max(0, min(original_size[0], x1 * scale_factor + x_offset))
+                    scaled_y1 = max(0, min(original_size[1], y1 * scale_factor + y_offset))
+                    scaled_x2 = max(0, min(original_size[0], x2 * scale_factor + x_offset))
+                    scaled_y2 = max(0, min(original_size[1], y2 * scale_factor + y_offset))
                     
-                    # Ensure coordinates are within image bounds
-                    scaled_x1 = max(0, min(original_size[0], scaled_x1))
-                    scaled_y1 = max(0, min(original_size[1], scaled_y1))
-                    scaled_x2 = max(0, min(original_size[0], scaled_x2))
-                    scaled_y2 = max(0, min(original_size[1], scaled_y2))
+                    # Get consistent color for this class
+                    color = ConsistentColorManager.get_class_color(class_name, all_classes)
                     
-                    # Get color for this class
-                    color = ImageOverlayProcessor.get_class_color(class_name, class_color_map)
+                    # Draw bounding box
+                    draw.rectangle([(scaled_x1, scaled_y1), (scaled_x2, scaled_y2)], outline=color, width=3)
                     
-                    # Draw bounding box rectangle with thick outline
-                    draw.rectangle(
-                        [(scaled_x1, scaled_y1), (scaled_x2, scaled_y2)],
-                        outline=color,
-                        width=3
-                    )
-                    
-                    # Prepare label text
-                    label_text = str(class_name)
-                    
-                    # Get text dimensions
+                    # Draw class label with background
                     if font:
-                        bbox_text = draw.textbbox((0, 0), label_text, font=font)
+                        bbox_text = draw.textbbox((0, 0), class_name, font=font)
                         text_width = bbox_text[2] - bbox_text[0]
                         text_height = bbox_text[3] - bbox_text[1]
                     else:
-                        # Fallback text size estimation
-                        text_width = len(label_text) * 8
-                        text_height = 14
+                        text_width, text_height = len(class_name) * 8, 14
                     
-                    # Ensure label fits within image
                     label_y = max(text_height + 6, scaled_y1 - 2)
                     
-                    # Draw label background rectangle
-                    label_bg_color = (*color, 179)  # 70% opacity
-                    draw.rectangle(
-                        [(scaled_x1, label_y - text_height - 6), 
-                         (scaled_x1 + text_width + 10, label_y - 2)],
-                        fill=color,  # PIL doesn't support alpha in fill, use solid color
-                        outline=None
-                    )
+                    # Label background
+                    draw.rectangle([(scaled_x1, label_y - text_height - 6), 
+                                   (scaled_x1 + text_width + 10, label_y - 2)], fill=color)
                     
-                    # Draw class label text
-                    draw.text(
-                        (scaled_x1 + 5, label_y - text_height - 4),
-                        label_text,
-                        fill=(255, 255, 255),  # White text
-                        font=font
-                    )
+                    # Label text
+                    draw.text((scaled_x1 + 5, label_y - text_height - 4), class_name, 
+                             fill=(255, 255, 255), font=font)
                     
-                    # Draw confidence score if available
+                    # Confidence score
                     if score > 0:
                         score_text = f"{int(score * 100)}%"
-                        
                         if small_font:
                             score_bbox = draw.textbbox((0, 0), score_text, font=small_font)
                             score_width = score_bbox[2] - score_bbox[0]
                             score_height = score_bbox[3] - score_bbox[1]
                         else:
-                            score_width = len(score_text) * 6
-                            score_height = 12
+                            score_width, score_height = len(score_text) * 6, 12
                         
-                        # Position score in bottom-right of bounding box
                         score_x = scaled_x2 - score_width - 5
                         score_y = scaled_y2 - score_height - 2
                         
-                        # Draw score background
-                        draw.rectangle(
-                            [(score_x - 3, score_y - 2),
-                             (score_x + score_width + 3, score_y + score_height + 2)],
-                            fill=color,
-                            outline=None
-                        )
+                        draw.rectangle([(score_x - 3, score_y - 2),
+                                       (score_x + score_width + 3, score_y + score_height + 2)], fill=color)
+                        draw.text((score_x, score_y), score_text, fill=(255, 255, 255), font=small_font)
                         
-                        # Draw score text
-                        draw.text(
-                            (score_x, score_y),
-                            score_text,
-                            fill=(255, 255, 255),
-                            font=small_font
-                        )
-                    
                 except Exception as obj_error:
-                    logger.error(f"Error drawing bounding box for object {i}: {str(obj_error)}")
+                    logger.error(f"Error drawing object {i}: {obj_error}")
                     continue
             
-            # Convert back to bytes
+            # Return processed image
             output_buffer = io.BytesIO()
             image.save(output_buffer, format='JPEG', quality=95, optimize=True)
-            
-            logger.info(f"Successfully drew bounding boxes on image")
             return output_buffer.getvalue()
             
         except Exception as e:
-            logger.error(f"Error drawing bounding boxes: {str(e)}")
-            return image_bytes  # Return original image on error
-    
+            logger.error(f"Error drawing bounding boxes: {e}")
+            return image_bytes
+
     @staticmethod
-    def draw_points(image_bytes: bytes, points: List[Dict[str, Any]], 
-                   pulse_factor: float = 1.0) -> bytes:
-        """
-        Draw detection points on image matching the Flutter PointPainter implementation.
-        
-        Args:
-            image_bytes: Original image as bytes
-            points: List of detected points with x, y, class
-            pulse_factor: Animation factor for pulsing effect (0.5-1.0)
-            
-        Returns:
-            Image bytes with points drawn
-        """
+    def draw_points(image_bytes: bytes, points: List[Dict[str, Any]], pulse_factor: float = 1.0) -> bytes:
+        """Draw points with consistent Flutter colors"""
         try:
             if not points:
-                logger.info("No points to draw, returning original image")
                 return image_bytes
                 
-            # Open and prepare image
             image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
             draw = ImageDraw.Draw(image)
-            
-            # Load font
             font = ImageOverlayProcessor.load_font(12)
             
-            # Class color mapping
-            class_color_map = {}
-            
-            logger.info(f"Drawing {len(points)} points on {image.size} image")
+            # Extract all class names for consistent color assignment  
+            all_classes = [point.get('class', f'Point_{i}') for i, point in enumerate(points)]
             
             for i, point in enumerate(points):
                 try:
-                    # Get normalized coordinates (0-1 range)
-                    x = float(point.get('x', 0.5))
-                    y = float(point.get('y', 0.5))
+                    x = max(0, min(1, float(point.get('x', 0.5))))
+                    y = max(0, min(1, float(point.get('y', 0.5))))
                     class_name = point.get('class', f'Point_{i}')
-                    score = point.get('score', 0.0)
-                    
-                    # Validate coordinates
-                    if not (0 <= x <= 1 and 0 <= y <= 1):
-                        logger.info(f"Point coordinates out of range: ({x}, {y})")
-                        x = max(0, min(1, x))
-                        y = max(0, min(1, y))
                     
                     # Scale to image size
                     scaled_x = x * image.size[0]
                     scaled_y = y * image.size[1]
                     
-                    # Get color for this class
-                    color = ImageOverlayProcessor.get_class_color(class_name, class_color_map)
+                    # Get consistent color
+                    color = ConsistentColorManager.get_class_color(class_name, all_classes)
                     
-                    # Draw outer pulsing circle (simulating animation)
+                    # Draw pulsing outer circle
                     pulse_radius = int(20 * pulse_factor)
-                    
-                    # Create a semi-transparent effect by drawing multiple circles
                     for radius in range(pulse_radius, 8, -2):
                         alpha_factor = 1.0 - (radius - 8) / (pulse_radius - 8)
                         circle_color = tuple(int(c * alpha_factor + 255 * (1 - alpha_factor)) for c in color)
-                        
-                        draw.ellipse(
-                            [(scaled_x - radius, scaled_y - radius),
-                             (scaled_x + radius, scaled_y + radius)],
-                            outline=circle_color,
-                            width=1
-                        )
+                        draw.ellipse([(scaled_x - radius, scaled_y - radius),
+                                     (scaled_x + radius, scaled_y + radius)], outline=circle_color, width=1)
                     
-                    # Draw inner fixed circle
+                    # Inner circle
                     inner_radius = 8
-                    draw.ellipse(
-                        [(scaled_x - inner_radius, scaled_y - inner_radius),
-                         (scaled_x + inner_radius, scaled_y + inner_radius)],
-                        fill=color,
-                        outline=color
-                    )
+                    draw.ellipse([(scaled_x - inner_radius, scaled_y - inner_radius),
+                                 (scaled_x + inner_radius, scaled_y + inner_radius)], fill=color, outline=color)
                     
-                    # Draw crosshairs
-                    line_length = 15
-                    line_width = 2
+                    # Crosshairs
+                    line_length, line_width = 15, 2
+                    draw.line([(scaled_x - line_length, scaled_y), (scaled_x + line_length, scaled_y)], 
+                             fill=color, width=line_width)
+                    draw.line([(scaled_x, scaled_y - line_length), (scaled_x, scaled_y + line_length)], 
+                             fill=color, width=line_width)
                     
-                    # Horizontal line
-                    draw.line(
-                        [(scaled_x - line_length, scaled_y), (scaled_x + line_length, scaled_y)],
-                        fill=color,
-                        width=line_width
-                    )
-                    
-                    # Vertical line
-                    draw.line(
-                        [(scaled_x, scaled_y - line_length), (scaled_x, scaled_y + line_length)],
-                        fill=color, 
-                        width=line_width
-                    )
-                    
-                    # Draw class label with background
-                    label_text = str(class_name)
-                    
+                    # Class label
                     if font:
-                        bbox_text = draw.textbbox((0, 0), label_text, font=font)
+                        bbox_text = draw.textbbox((0, 0), class_name, font=font)
                         text_width = bbox_text[2] - bbox_text[0]
                         text_height = bbox_text[3] - bbox_text[1]
                     else:
-                        text_width = len(label_text) * 7
-                        text_height = 12
+                        text_width, text_height = len(class_name) * 7, 12
                     
-                    # Position label to avoid going off-screen
-                    label_x = scaled_x + 10
-                    label_y = scaled_y - 20 - text_height
+                    label_x = min(scaled_x + 10, image.size[0] - text_width - 10)
+                    label_y = max(0, scaled_y - 20 - text_height)
                     
-                    if label_x + text_width > image.size[0]:
-                        label_x = scaled_x - text_width - 10
-                    if label_y < 0:
-                        label_y = scaled_y + 20
-                    
-                    # Draw label background
-                    draw.rectangle(
-                        [(label_x - 2, label_y - 2),
-                         (label_x + text_width + 4, label_y + text_height + 2)],
-                        fill=color,
-                        outline=None
-                    )
-                    
-                    # Draw label text
-                    draw.text(
-                        (label_x, label_y),
-                        label_text,
-                        fill=(255, 255, 255),
-                        font=font
-                    )
-                    
-                    # Add confidence score if available
-                    if score > 0:
-                        score_text = f"{int(score * 100)}%"
-                        if font:
-                            score_bbox = draw.textbbox((0, 0), score_text, font=font)
-                            score_width = score_bbox[2] - score_bbox[0]
-                        else:
-                            score_width = len(score_text) * 6
-                        
-                        draw.text(
-                            (label_x, label_y + text_height + 2),
-                            score_text,
-                            fill=(255, 255, 255),
-                            font=font
-                        )
+                    draw.rectangle([(label_x - 2, label_y - 2),
+                                   (label_x + text_width + 4, label_y + text_height + 2)], fill=color)
+                    draw.text((label_x, label_y), class_name, fill=(255, 255, 255), font=font)
                     
                 except Exception as point_error:
-                    logger.error(f"Error drawing point {i}: {str(point_error)}")
+                    logger.error(f"Error drawing point {i}: {point_error}")
                     continue
             
-            # Convert back to bytes
             output_buffer = io.BytesIO()
             image.save(output_buffer, format='JPEG', quality=95, optimize=True)
-            
-            logger.info(f"Successfully drew points on image")
             return output_buffer.getvalue()
             
         except Exception as e:
-            logger.error(f"Error drawing points: {str(e)}")
+            logger.error(f"Error drawing points: {e}")
             return image_bytes
-    
+
     @staticmethod
     def apply_inference_overlay(image_bytes: bytes, inference_result: Dict[str, Any], 
                                inference_mode: str) -> bytes:
