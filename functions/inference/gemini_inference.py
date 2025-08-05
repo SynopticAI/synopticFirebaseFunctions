@@ -5,15 +5,15 @@ from google import genai
 from google.genai import types
 from firebase_functions import logger
 import json
-import re
 from PIL import Image
 import io
 from config.loader import get_gemini_api_key
 
 def run_gemini_inference(image_data, device_config):
     """
-    Main function to run Gemini inference for all classes at once.
-    Now includes credit usage calculation based on token count and improved coordinate handling.
+    Main function to run Gemini inference using Google's native object detection capabilities.
+    Uses Google's recommended [ymin, xmin, ymax, xmax] format normalized to [0, 1000].
+    Now leverages Gemini 2.5's built-in object detection training for better accuracy.
     """
     classes = device_config.get('classes', [])
     class_descriptions = device_config.get('classDescriptions', [])
@@ -25,53 +25,18 @@ def run_gemini_inference(image_data, device_config):
     class_prompt_list = ""
     for i, class_name in enumerate(classes):
         description = class_descriptions[i].strip() if i < len(class_descriptions) and class_descriptions[i].strip() else class_name
-        class_prompt_list += f"- class_name: \"{class_name}\", description: \"{description}\"\n"
+        class_prompt_list += f"- {class_name}: {description}\n"
 
-    # Updated prompt to request center coordinates + width/height format
+    # Use Google's native object detection approach - simpler prompt that lets Gemini use its natural format
     prompt = f"""
-    You are a computer vision expert. Analyze the image and detect all instances of the following objects/situations.
+Detect all instances of the following objects in the image:
 
-    OBJECTS TO DETECT:
-    {class_prompt_list}
+{class_prompt_list}
 
-    Your response MUST be a single raw JSON list of all detected objects.
-    Each object in the list must be a dictionary with these exact keys:
-    1. "class_name": The string name of the detected class.
-    2. "score": A confidence score (float between 0.0 and 1.0).
-    3. "center_x": Normalized x-coordinate of the object's center (float between 0.0 and 1.0).
-    4. "center_y": Normalized y-coordinate of the object's center (float between 0.0 and 1.0).
-    5. "width": Normalized width of the bounding box (float between 0.0 and 1.0).
-    6. "height": Normalized height of the bounding box (float between 0.0 and 1.0).
+For each detection, provide the object name from the list above and its bounding box coordinates. The box_2d should be [ymin, xmin, ymax, xmax] normalized to 0-1000.
 
-    Important coordinate guidelines:
-    - All coordinates must be normalized (between 0.0 and 1.0)
-    - center_x and center_y represent the exact center of the object
-    - width and height represent the full dimensions of the bounding box
-    - Ensure objects are clearly visible and confidence scores are realistic
-
-    Example response:
-    [
-      {{
-        "class_name": "car",
-        "score": 0.92,
-        "center_x": 0.3,
-        "center_y": 0.25,
-        "width": 0.2,
-        "height": 0.15
-      }},
-      {{
-        "class_name": "person", 
-        "score": 0.88,
-        "center_x": 0.65,
-        "center_y": 0.4,
-        "width": 0.1,
-        "height": 0.3
-      }}
-    ]
-
-    If you find no objects, return an empty list: [].
-    Only return valid JSON. Do not include any explanations or markdown formatting.
-    """
+Return as a JSON array. If no objects are found, return an empty array.
+"""
 
     try:
         # Get API key from config
@@ -82,18 +47,21 @@ def run_gemini_inference(image_data, device_config):
         client = genai.Client(api_key=api_key)
         img = Image.open(io.BytesIO(image_data))
         
+        # Use Google's recommended approach: image first, then text
         response = client.models.generate_content(
-            model='models/gemini-2.5-flash-lite-preview-06-17',
-            contents=[prompt, img],
+            model='models/gemini-2.5-flash-lite',
+            # model='models/gemini-2.5-flash',
+            # model='models/gemini-2.5-pro',
+            contents=[img, prompt],  # Image before text as recommended by Google
             config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=-1) # -1 enables dynamic thinking
+                response_mime_type="application/json",  # Force structured JSON response
+                thinking_config=types.ThinkingConfig(thinking_budget=0)  # Try 0 instead of -1
             )
         )
 
         # Calculate credit usage based on token count
         credit_usage = 0
         try:
-            # Get usage metadata from response
             usage_metadata = getattr(response, 'usage_metadata', None)
             if usage_metadata:
                 total_token_count = getattr(usage_metadata, 'total_token_count', 0)
@@ -101,44 +69,22 @@ def run_gemini_inference(image_data, device_config):
                 logger.info(f"Gemini token usage: {total_token_count}, credit cost: {credit_usage}")
             else:
                 # Fallback: estimate based on prompt and response length
-                prompt_tokens = len(prompt.split()) * 1.3  # rough estimation
+                prompt_tokens = len(prompt.split()) * 1.3
                 response_tokens = len(response.text.split()) * 1.3
                 estimated_tokens = prompt_tokens + response_tokens
                 credit_usage = round(0.3 * estimated_tokens, 2)
-                logger.warning(f"Using estimated token count: {estimated_tokens}, credit cost: {credit_usage}")
+                logger.info(f"Using estimated token count: {estimated_tokens}, credit cost: {credit_usage}")
         except Exception as token_error:
             logger.error(f"Error calculating token usage: {token_error}")
-            # Fallback to a fixed cost if token counting fails
-            credit_usage = 15.0  # Reasonable fallback for Gemini calls
+            credit_usage = 15.0  # Reasonable fallback
 
-        # Improved JSON parsing with better error handling
-        raw_response = response.text.strip()
-        logger.info(f"Raw Gemini response: {raw_response[:200]}...")  # Log first 200 chars for debugging
-        
-        # Clean up the response text more thoroughly
-        # Remove markdown code blocks
-        raw_response = re.sub(r'```(?:json)?\s*', '', raw_response)
-        raw_response = re.sub(r'```\s*$', '', raw_response)
-        
-        # Remove any leading/trailing text that's not JSON
-        # Find the first '[' and last ']' to extract just the JSON array
-        start_idx = raw_response.find('[')
-        end_idx = raw_response.rfind(']')
-        
-        if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
-            logger.error(f"No valid JSON array found in response: {raw_response}")
-            return {
-                'objects': [],
-                'credit_usage': credit_usage,
-                'error': 'Invalid JSON response format'
-            }
-        
-        json_str = raw_response[start_idx:end_idx + 1]
+        # Parse JSON response (should be much cleaner with native JSON response mode)
+        logger.info(f"Raw Gemini response: {response.text[:500]}...")
         
         try:
-            detections = json.loads(json_str)
+            detections = json.loads(response.text)
         except json.JSONDecodeError as json_error:
-            logger.error(f"JSON parsing failed: {json_error}, raw JSON: {json_str}")
+            logger.error(f"JSON parsing failed: {json_error}, raw response: {response.text}")
             return {
                 'objects': [],
                 'credit_usage': credit_usage,
@@ -153,85 +99,100 @@ def run_gemini_inference(image_data, device_config):
                 'error': 'Response is not a JSON array'
             }
 
-        # --- TRANSFORMATION FROM CENTER+WH TO CORNER COORDINATES ---
+        # Debug: Log the structure of the first detection to understand the format
+        if detections:
+            logger.info(f"First detection structure: {json.dumps(detections[0], indent=2)}")
+            logger.info(f"Available fields in first detection: {list(detections[0].keys())}")
+
+        # Convert from Google's native format to our format
         formatted_objects = []
         for i, det in enumerate(detections):
             try:
-                # Validate required fields
-                required_fields = ['class_name', 'score', 'center_x', 'center_y', 'width', 'height']
-                missing_fields = [field for field in required_fields if field not in det]
-                if missing_fields:
-                    logger.warning(f"Detection {i} missing fields: {missing_fields}, skipping")
+                # Try multiple possible field names for class
+                class_name = None
+                for class_field in ['class_name', 'label', 'name', 'object', 'class', 'category']:
+                    if class_field in det:
+                        class_name = det[class_field]
+                        break
+                
+                if class_name is None:
+                    logger.info(f"Detection {i} has no recognizable class field, available fields: {list(det.keys())}")
                     continue
 
-                # Extract and validate center coordinates and dimensions
-                center_x = float(det.get('center_x', 0.5))
-                center_y = float(det.get('center_y', 0.5))
-                width = float(det.get('width', 0.1))
-                height = float(det.get('height', 0.1))
-                score = float(det.get('score', 0.0))
-                class_name = det.get('class_name', 'unknown')
+                # Try multiple possible field names for confidence
+                confidence = None
+                for conf_field in ['confidence', 'score', 'confidence_score', 'probability']:
+                    if conf_field in det:
+                        confidence = float(det[conf_field])
+                        break
+                
+                if confidence is None:
+                    logger.info(f"Detection {i} has no recognizable confidence field, using default 0.8")
+                    confidence = 0.8  # Default confidence if not provided
 
-                # Validate coordinate ranges
-                if not (0.0 <= center_x <= 1.0 and 0.0 <= center_y <= 1.0):
-                    logger.warning(f"Invalid center coordinates for detection {i}: ({center_x}, {center_y}), skipping")
+                # Try to get bounding box - this should be more consistent
+                box_2d = det.get('box_2d', det.get('bbox', det.get('bounding_box', [])))
+                
+                if not box_2d:
+                    logger.info(f"Detection {i} has no bounding box data, available fields: {list(det.keys())}")
                     continue
-                
-                if not (0.0 < width <= 1.0 and 0.0 < height <= 1.0):
-                    logger.warning(f"Invalid dimensions for detection {i}: {width}x{height}, skipping")
+
+                # Validate box_2d format - should be [ymin, xmin, ymax, xmax]
+                if not isinstance(box_2d, list) or len(box_2d) != 4:
+                    logger.info(f"Invalid box_2d format for detection {i}: {box_2d}, skipping")
                     continue
 
-                if not (0.0 <= score <= 1.0):
-                    logger.warning(f"Invalid confidence score for detection {i}: {score}, clamping to [0,1]")
-                    score = max(0.0, min(1.0, score))
+                # Extract coordinates: [ymin, xmin, ymax, xmax] in [0, 1000] as per Google's format
+                ymin, xmin, ymax, xmax = [float(coord) for coord in box_2d]
 
-                # Convert center+wh to corner coordinates
-                half_width = width / 2.0
-                half_height = height / 2.0
-                
-                x_min = center_x - half_width
-                y_min = center_y - half_height
-                x_max = center_x + half_width
-                y_max = center_y + half_height
-                
-                # Clamp to valid normalized range
-                x_min = max(0.0, min(x_min, 1.0))
-                y_min = max(0.0, min(y_min, 1.0))
-                x_max = max(0.0, min(x_max, 1.0))
-                y_max = max(0.0, min(y_max, 1.0))
-                
-                # Ensure min <= max (handle edge cases)
-                if x_min >= x_max:
-                    x_min = max(0.0, center_x - 0.05)
-                    x_max = min(1.0, center_x + 0.05)
-                if y_min >= y_max:
-                    y_min = max(0.0, center_y - 0.05)
-                    y_max = min(1.0, center_y + 0.05)
+                # Validate coordinate ranges should be [0, 1000]
+                if not all(0 <= coord <= 1000 for coord in [ymin, xmin, ymax, xmax]):
+                    logger.info(f"Coordinates out of [0,1000] range for detection {i}: {box_2d}, clamping")
+                    ymin = max(0, min(ymin, 1000))
+                    xmin = max(0, min(xmin, 1000))
+                    ymax = max(0, min(ymax, 1000))
+                    xmax = max(0, min(xmax, 1000))
 
-                # Scale to 1024x1024 pixel space for backward compatibility
-                x1 = max(0, min(int(x_min * 1024), 1023))
-                y1 = max(0, min(int(y_min * 1024), 1023))
-                x2 = max(0, min(int(x_max * 1024), 1023))
-                y2 = max(0, min(int(y_max * 1024), 1023))
+                # Ensure min <= max (basic sanity check)
+                if ymin >= ymax or xmin >= xmax:
+                    logger.info(f"Invalid box coordinates for detection {i}: ymin={ymin}, ymax={ymax}, xmin={xmin}, xmax={xmax}, skipping")
+                    continue
+
+                # Validate confidence score
+                if not (0.0 <= confidence <= 1.0):
+                    logger.info(f"Invalid confidence score for detection {i}: {confidence}, clamping to [0,1]")
+                    confidence = max(0.0, min(1.0, confidence))
+
+                # Convert from Google's [0, 1000] to [0, 1] normalized coordinates
+                ymin_norm = ymin / 1000.0
+                xmin_norm = xmin / 1000.0
+                ymax_norm = ymax / 1000.0
+                xmax_norm = xmax / 1000.0
+
+                # Convert to our expected 1024x1024 pixel space format (for backward compatibility)
+                x1 = max(0, min(int(xmin_norm * 1024), 1023))
+                y1 = max(0, min(int(ymin_norm * 1024), 1023))
+                x2 = max(0, min(int(xmax_norm * 1024), 1023))
+                y2 = max(0, min(int(ymax_norm * 1024), 1023))
 
                 # Final validation - ensure we have a valid box
                 if x1 >= x2 or y1 >= y2:
-                    logger.warning(f"Invalid final box coordinates for detection {i}: ({x1},{y1},{x2},{y2}), skipping")
+                    logger.info(f"Invalid final box coordinates for detection {i}: ({x1},{y1},{x2},{y2}), skipping")
                     continue
 
                 formatted_objects.append({
                     'class': class_name,
-                    'score': score,
+                    'score': confidence,
                     'bbox': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2}
                 })
                 
-                logger.info(f"Successfully processed detection {i}: {class_name} at ({x1},{y1},{x2},{y2}) with score {score:.2f}")
+                logger.info(f"Successfully processed detection {i}: {class_name} at ({x1},{y1},{x2},{y2}) with score {confidence:.2f}")
                 
             except (ValueError, TypeError) as e:
                 logger.error(f"Error processing detection {i}: {e}, detection data: {det}")
                 continue
         
-        logger.info(f"Gemini found and formatted {len(formatted_objects)} valid objects out of {len(detections)} detections.")
+        logger.info(f"Gemini native object detection found {len(formatted_objects)} valid objects out of {len(detections)} detections.")
         
         return {
             'objects': formatted_objects,
@@ -239,9 +200,9 @@ def run_gemini_inference(image_data, device_config):
         }
 
     except Exception as e:
-        logger.error(f"Error in Gemini inference pipeline: {str(e)}")
+        logger.error(f"Error in Gemini native object detection pipeline: {str(e)}")
         return {
             "error": str(e),
             "objects": [],
-            "credit_usage": 15.0  # Fallback credit cost for error cases
+            "credit_usage": 15.0  # Fallback credit cost
         }

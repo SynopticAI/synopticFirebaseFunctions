@@ -1094,32 +1094,34 @@ def build_system_prompt(device_data: dict, setup_stage: float, user_language: st
     elif setup_stage >= 1:
         stage_guidance = "Guide user to test the device. When testing is complete, update setupStage to 2.0."
     else:
-        stage_guidance = "Help user set up their device: name, task description, inference mode, and classes. Update setupStage as you progress (0.3, 0.5, 0.8, then 1.0 when ready for testing)."
+        stage_guidance = "As soon as you understand what the user wants to monitor, immediately set up the device with appropriate defaults. Only ask questions if the user's intent is unclear."
     
-    return f"""You are an AI assistant helping users set up industrial monitoring devices.
+    return f"""You are an AI assistant helping users set up industrial monitoring devices. Respond in {user_language}.
 
-Current device settings:
-{json.dumps(device_data, indent=2)}
-
+Current device settings: {json.dumps(device_data, indent=2)}
 Setup stage: {setup_stage}
-Current task: {stage_guidance}
 
-Instructions:
-- Respond in {user_language}
-- Use **bold** formatting for important words (e.g., **inference mode**)
-- Be conversational and direct
-- Ask for images when helpful (user clicks image icon to upload)
-- Take actions proactively when user intent is clear
+IMPORTANT: {stage_guidance}
+
+When setting up devices:
+- **Take action immediately** when user intent is clear
+- Set smart defaults: device name from task description, "Detect" inference mode for most cases  
+- Use **bold** formatting for key terms
+- Only ask questions if truly necessary for setup
+- Call functions proactively to make progress
+
+Examples of immediate action:
+- User says "detect defects": → Set name="Defect Detection", classes=["normal", "defect"], create icon
+- User says "count people": → Set name="People Counter", classes=["person"], create icon
+- User says "monitor safety": → Ask what specific safety aspect (PPE, restricted areas, etc.)
 
 Available inference modes:
-- Point: Find exact coordinates of features
-- Detect: Identify objects with bounding boxes (best for counting/classification)
-- VQA: Answer questions about images  
-- Caption: Generate image descriptions
+- Detect: Object detection with bounding boxes (use for most cases)
+- Point: Find coordinates (for precise positioning tasks)
+- VQA: Answer questions about images
+- Caption: Generate descriptions
 
-You can call multiple functions simultaneously. Always provide a helpful response along with any function calls.
-
-Never modify these protected settings: status, connectedCameraId, last_heartbeat, iconAlreadyCreated, deletionStarted"""
+Never modify: status, connectedCameraId, last_heartbeat, iconAlreadyCreated, deletionStarted"""
 
 def execute_function_call(func_name: str, func_args: dict, user_id: str, device_id: str, message_timestamp: str, call_index: int = 1) -> dict:
     """Execute a function call and return the result"""
@@ -1211,8 +1213,32 @@ def assistant_chat(request: Request):
         # Build system prompt
         system_prompt = build_system_prompt(device_data, setup_stage, user_language)
         
-        # Prepare message content
-        contents = [system_prompt, user_message]
+        # Handle different prompt types
+        if prompt_type == "initial":
+            if setup_stage == 0 and not device_data.get('name'):
+                # Truly initial setup
+                full_prompt = f"""{system_prompt}
+
+This is the initial setup. Greet the user warmly and ask what they want to monitor. Be brief and welcoming.
+
+USER MESSAGE: {user_message}"""
+            else:
+                # Returning to existing device
+                full_prompt = f"""{system_prompt}
+
+The user is returning to configure their device. Acknowledge the current setup and offer to help continue.
+
+USER MESSAGE: {user_message}"""
+        else:
+            # Regular conversational prompt
+            full_prompt = f"""{system_prompt}
+
+USER MESSAGE: {user_message}
+
+Respond to the user's message above. If their intent is clear, take immediate action with function calls."""
+        
+        # Prepare message content - start with the full prompt
+        contents = [full_prompt]
         
         # Handle image attachments
         image_timestamps = request_json.get("imageTimestamps", [])
@@ -1237,7 +1263,7 @@ def assistant_chat(request: Request):
         client = genai.Client(api_key=get_gemini_api_key())
         
         response = client.models.generate_content(
-            model='models/gemini-2.0-flash-exp',
+            model='models/gemini-2.5-flash',
             contents=contents,
             config=types.GenerateContentConfig(
                 tools=GEMINI_TOOLS,
@@ -1293,7 +1319,6 @@ def assistant_chat(request: Request):
 # - process_create_device_icon()
 # - update_device_settings() 
 # - add_cors_headers()
-
 
 # -------------------------------- ASSISTANT_CHAT END  --------------------------------
 
