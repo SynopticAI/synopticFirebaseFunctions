@@ -93,23 +93,345 @@ DIAGONAL_SWAG_URL = "https://diagonalswag-723311357828.europe-west4.run.app/pred
 
 # =================== END NOTIFICATION SYSTEM ===================
 
+# from utils.data_processing_utils import get_device_similarity_settings, get_device_overlay_settings, log_similarity_metrics
+from utils import data_processing_utils as dpu
 
+# Replace your existing receive_image function in main.py with this enhanced version
 
-
-
-
-
-
-
-
-# Updated receive_image function for main.py
-
-# Updated receive_image function to handle credit usage in response
 @https_fn.on_request(region="europe-west4")
 def receive_image(request):
     """
-    Enhanced receive_image function that processes inference for operational devices
-    and triggers notifications based on detection results. Now includes credit tracking.
+    Enhanced receive_image function with similarity-based caching, 
+    server-side overlays, and rolling window storage management.
+    
+    New Features:
+    - Image similarity comparison for intelligent caching
+    - Server-side bounding box and point overlays
+    - Rolling window storage management (keeps last N images)
+    - Comprehensive performance monitoring
+    - Graceful error handling and fallback behavior
+    """
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        response = add_cors_headers(response)
+        return response, 204
+    
+    # Start overall timing
+    pipeline_start_time = time.time()
+    pipeline_stages = {}
+    
+    try:
+        # Parse the image upload (existing logic)
+        if request.method != "POST":
+            return add_cors_headers(jsonify({"error": "Invalid HTTP method. POST required."})), 405
+
+        # STAGE 1: Parse request and extract image data
+        stage_start = time.time()
+        user_id, device_id, image_bytes, content_type = _parse_image_request(request)
+        pipeline_stages['request_parsing'] = (time.time() - stage_start) * 1000
+        
+        if not all([user_id, device_id, image_bytes]):
+            return add_cors_headers(jsonify({"error": "Missing required parameters"})), 400
+
+        current_time = int(time.time() * 1000)
+        timestamp = str(current_time)
+        
+        logger.info(f"🔄 Processing image for device {device_id} at {timestamp}")
+        
+        # Initialize response data
+        response_data = {
+            "status": "success",
+            "timestamp": timestamp,
+            "device_id": device_id,
+        }
+        
+        # STAGE 2: Get device configuration and settings
+        stage_start = time.time()
+        db = firestore.client()
+        device_ref = db.collection("users").document(user_id).collection("devices").document(device_id)
+        device_doc = device_ref.get()
+        
+        if not device_doc.exists:
+            return add_cors_headers(jsonify({"error": "Device not found"})), 404
+            
+        device_data = device_doc.to_dict()
+        device_status = device_data.get("status", "Not Configured")
+        inference_mode = device_data.get("inferenceMode", "Detect")
+        
+        # Get enhanced settings
+        similarity_settings = dpu.get_device_similarity_settings(device_data)
+        overlay_settings = dpu.get_device_overlay_settings(device_data)
+        
+        pipeline_stages['config_loading'] = (time.time() - stage_start) * 1000
+        
+        logger.info(f"📋 Device {device_id}: status={device_status}, mode={inference_mode}, "
+                   f"similarity={'enabled' if similarity_settings['enabled'] else 'disabled'}")
+        
+        # Initialize processing variables
+        inference_result = None
+        cache_hit = False
+        similarity_result = None
+        processed_image_bytes = image_bytes  # Default to original
+        
+        # Only process inference if device is operational
+        if device_status == "Operational":
+            try:
+                logger.info(f"🚀 Processing inference for operational device {device_id}")
+                
+                # STAGE 3: Similarity comparison (if enabled)
+                if similarity_settings['enabled']:
+                    stage_start = time.time()
+                    
+                    previous_image_path = device_data.get('last_image_path')
+                    previous_inference_result = device_data.get('last_inference_result')
+                    
+                    if previous_image_path and previous_inference_result:
+                        try:
+                            # Download previous image for comparison
+                            from utils.storage_management import StorageManager
+                            bucket = storage.bucket()
+                            previous_blob = bucket.blob(previous_image_path)
+                            
+                            if previous_blob.exists():
+                                previous_image_bytes = previous_blob.download_as_bytes()
+                                
+                                # Calculate similarity
+                                from utils.image_similarity import ImageSimilarityCalculator
+                                similarity_result = ImageSimilarityCalculator.calculate_similarity(
+                                    image_bytes, 
+                                    previous_image_bytes, 
+                                    method=similarity_settings['algorithm']
+                                )
+                                
+                                logger.info(f"🔍 Similarity: {similarity_result['similarity_score']:.3f} "
+                                          f"(threshold: {similarity_settings['threshold']}, "
+                                          f"method: {similarity_settings['algorithm']})")
+                                
+                                # Check if similarity is above threshold
+                                if similarity_result['similarity_score'] >= similarity_settings['threshold']:
+                                    # CACHE HIT - Reuse previous inference result
+                                    inference_result = previous_inference_result.copy()
+                                    inference_result['timestamp'] = timestamp
+                                    inference_result['cache_hit'] = True
+                                    inference_result['similarity_score'] = similarity_result['similarity_score']
+                                    cache_hit = True
+                                    
+                                    logger.info(f"✅ CACHE HIT for device {device_id} - "
+                                              f"Similarity: {similarity_result['similarity_score']:.3f}")
+                                else:
+                                    logger.info(f"❌ CACHE MISS for device {device_id} - "
+                                              f"Similarity: {similarity_result['similarity_score']:.3f} < {similarity_settings['threshold']}")
+                            else:
+                                logger.info(f"Previous image not found: {previous_image_path}")
+                        
+                        except Exception as similarity_error:
+                            logger.info(f"Similarity check failed, proceeding with normal inference: {str(similarity_error)}")
+                    else:
+                        logger.info("No previous image/result found for similarity comparison")
+                    
+                    pipeline_stages['similarity_check'] = (time.time() - stage_start) * 1000
+                
+                # STAGE 4: Run inference (if no cache hit)
+                if not cache_hit:
+                    stage_start = time.time()
+                    logger.info(f"🔄 Running new inference for device {device_id}")
+                    
+                    inference_result = inference(image_bytes, user_id, device_id)
+                    
+                    if "error" in inference_result:
+                        logger.error(f"Inference failed: {inference_result['error']}")
+                        return add_cors_headers(jsonify({"error": inference_result["error"]})), 500
+                    
+                    inference_result['cache_hit'] = False
+                    pipeline_stages['inference'] = (time.time() - stage_start) * 1000
+                    
+                    logger.info(f"✅ Inference completed for device {device_id}")
+                else:
+                    # Cache hit - record zero inference time
+                    pipeline_stages['inference'] = 0.0
+                
+                # STAGE 5: Apply server-side overlays (if enabled)
+                if overlay_settings['enabled']:
+                    stage_start = time.time()
+                    
+                    try:
+                        from utils.image_overlay import ImageOverlayProcessor
+                        
+                        # Apply inference overlays (bounding boxes, points, etc.)
+                        processed_image_bytes = ImageOverlayProcessor.apply_inference_overlay(
+                            image_bytes, inference_result, inference_mode
+                        )
+                        
+                        logger.info(f"🎨 Applied {inference_mode} overlays to image")
+                        
+                    except Exception as overlay_error:
+                        logger.info(f"Overlay processing failed, using original image: {str(overlay_error)}")
+                        processed_image_bytes = image_bytes
+                    
+                    pipeline_stages['overlay_processing'] = (time.time() - stage_start) * 1000
+                else:
+                    pipeline_stages['overlay_processing'] = 0.0
+                    logger.info("🎨 Overlays disabled, using original image")
+                
+                # STAGE 6: Save processed image
+                stage_start = time.time()
+                from utils.storage_management import StorageManager
+                
+                file_path = StorageManager.save_processed_image(
+                    user_id, device_id, processed_image_bytes, timestamp, content_type
+                )
+                response_data["file_path"] = file_path
+                pipeline_stages['image_saving'] = (time.time() - stage_start) * 1000
+                
+                # STAGE 7: Storage cleanup (rolling window)
+                stage_start = time.time()
+                try:
+                    cleanup_result = StorageManager.cleanup_old_images(
+                        user_id, device_id, similarity_settings['rolling_window_size']
+                    )
+                    
+                    if cleanup_result.get('deleted_count', 0) > 0:
+                        logger.info(f"🧹 Cleaned up {cleanup_result['deleted_count']} old images for device {device_id}")
+                        response_data["cleanup_result"] = cleanup_result
+                        
+                except Exception as cleanup_error:
+                    logger.info(f"Image cleanup failed: {str(cleanup_error)}")
+                
+                pipeline_stages['storage_cleanup'] = (time.time() - stage_start) * 1000
+                
+                # STAGE 8: Process notifications and save inference data
+                stage_start = time.time()
+                try:
+                    # Save inference output and trigger notifications
+                    save_inference_output(user_id, device_id, inference_result, inference_mode)
+                    
+                    # Trigger notification system
+                    trigger_action(user_id, device_id, inference_result, inference_mode)
+                    
+                    logger.info(f"🔔 Processed notifications for device {device_id}")
+                    
+                except Exception as notification_error:
+                    logger.error(f"Notification processing failed: {str(notification_error)}")
+                
+                pipeline_stages['notifications'] = (time.time() - stage_start) * 1000
+                
+                # STAGE 9: Log metrics and store comparison data
+                stage_start = time.time()
+                
+                # Log similarity metrics if available
+                if similarity_result:
+                    dpu.log_similarity_metrics(device_ref, similarity_result, cache_hit, current_time)
+                
+                # Store current image reference for next comparison
+                dpu.store_similarity_comparison_data(
+                    device_ref, file_path, inference_result, similarity_result, current_time
+                )
+                
+                # Calculate total pipeline time
+                total_pipeline_time = (time.time() - pipeline_start_time) * 1000
+                
+                # Log comprehensive pipeline metrics
+                dpu.log_processing_pipeline_metrics(
+                    device_id, pipeline_stages, cache_hit, total_pipeline_time
+                )
+                
+                # Update device processing stats
+                processing_metrics = {
+                    'cache_hit': cache_hit,
+                    'total_time_ms': total_pipeline_time,
+                    'inference_time_ms': pipeline_stages.get('inference', 0),
+                    'similarity_score': similarity_result.get('similarity_score') if similarity_result else None,
+                    'overlay_applied': overlay_settings['enabled'],
+                    'timestamp': current_time
+                }
+                dpu.update_device_processing_stats(device_ref, processing_metrics)
+                
+                pipeline_stages['metrics_logging'] = (time.time() - stage_start) * 1000
+                
+                # Add comprehensive response data
+                response_data.update({
+                    "inference_processed": True,
+                    "inference_mode": inference_mode,
+                    "cache_hit": cache_hit,
+                    "similarity_score": similarity_result.get('similarity_score') if similarity_result else None,
+                    "similarity_method": similarity_result.get('method') if similarity_result else None,
+                    "credit_usage": inference_result.get("credit_usage", 0),
+                    "overlay_applied": overlay_settings['enabled'],
+                    "total_processing_time_ms": round(total_pipeline_time, 2),
+                    "pipeline_stages": {k: round(v, 2) for k, v in pipeline_stages.items()}
+                })
+                
+                # Performance summary
+                if cache_hit:
+                    logger.info(f"🚀 CACHE HIT processing completed in {total_pipeline_time:.1f}ms")
+                else:
+                    logger.info(f"⚡ FULL processing completed in {total_pipeline_time:.1f}ms")
+                
+            except Exception as inference_error:
+                logger.error(f"❌ Inference processing failed: {str(inference_error)}")
+                response_data["inference_error"] = str(inference_error)
+                
+                # Still save the original image even if inference fails
+                try:
+                    from utils.storage_management import StorageManager
+                    file_path = StorageManager.save_processed_image(
+                        user_id, device_id, image_bytes, timestamp, content_type
+                    )
+                    response_data["file_path"] = file_path
+                    response_data["inference_processed"] = False
+                    response_data["fallback"] = "saved_original_image"
+                except Exception as save_error:
+                    logger.error(f"Failed to save original image: {str(save_error)}")
+        
+        else:
+            # Device not operational - just save the image
+            logger.info(f"📁 Device {device_id} not operational ({device_status}), saving image only")
+            
+            try:
+                from utils.storage_management import StorageManager
+                file_path = StorageManager.save_processed_image(
+                    user_id, device_id, image_bytes, timestamp, content_type
+                )
+                response_data["file_path"] = file_path
+                response_data["inference_processed"] = False
+                response_data["reason"] = f"Device status: {device_status}"
+                
+                # Still do rolling window cleanup
+                cleanup_result = StorageManager.cleanup_old_images(
+                    user_id, device_id, similarity_settings['rolling_window_size']
+                )
+                if cleanup_result.get('deleted_count', 0) > 0:
+                    response_data["cleanup_result"] = cleanup_result
+                    
+            except Exception as save_error:
+                logger.error(f"Failed to save image for non-operational device: {str(save_error)}")
+                return add_cors_headers(jsonify({"error": f"Failed to save image: {str(save_error)}"})), 500
+        
+        # Final response
+        total_time = (time.time() - pipeline_start_time) * 1000
+        response_data["total_time_ms"] = round(total_time, 2)
+        
+        logger.info(f"✅ Successfully processed request for device {device_id} in {total_time:.1f}ms")
+        return add_cors_headers(jsonify(response_data))
+        
+    except Exception as e:
+        total_time = (time.time() - pipeline_start_time) * 1000
+        logger.error(f"❌ Critical error in receive_image after {total_time:.1f}ms: {str(e)}")
+        
+        error_response = {
+            "error": str(e),
+            "timestamp": int(time.time() * 1000),
+            "processing_time_ms": round(total_time, 2)
+        }
+        
+        return add_cors_headers(jsonify(error_response)), 500
+
+
+# Additional helper function for monitoring
+@https_fn.on_request(region="europe-west4")
+def get_device_performance_metrics(request):
+    """
+    Get performance metrics for a device (cache hit ratios, processing times, etc.)
     """
     if request.method == 'OPTIONS':
         response = jsonify({})
@@ -117,108 +439,53 @@ def receive_image(request):
         return response, 204
     
     try:
-        # Parse the image upload (existing logic)
-        if request.method != "POST":
-            return add_cors_headers(jsonify({"error": "Invalid HTTP method. POST required."})), 405
-
-        # Extract image data and parameters
-        user_id, device_id, image_bytes, content_type = _parse_image_request(request)
+        request_json = request.get_json(silent=True)
+        if not request_json:
+            return add_cors_headers(jsonify({"error": "Invalid JSON payload"})), 400
         
-        if not all([user_id, device_id, image_bytes]):
-            return add_cors_headers(jsonify({"error": "Missing required parameters"})), 400
-
-        # Store the image with timestamp
-        timestamp = str(int(time.time() * 1000))
-        file_extension = "jpg" if content_type == "image/jpeg" else "png"
-        filename = f"{timestamp}.{file_extension}"
-        file_path = f"users/{user_id}/devices/{device_id}/receiving/{filename}"
+        user_id = request_json.get("user_id")
+        device_id = request_json.get("device_id")
+        hours = request_json.get("hours", 24)
         
-        # Upload to Firebase Storage
-        bucket = storage.bucket()
-        blob = bucket.blob(file_path)
-        blob.upload_from_string(image_bytes, content_type=content_type)
+        if not all([user_id, device_id]):
+            return add_cors_headers(jsonify({"error": "Missing user_id or device_id"})), 400
         
-        # Force garbage collection after image upload
-        gc.collect()
-
-        # Initialize response data
-        response_data = {
-            "status": "success",
-            "file_path": file_path,
-            "timestamp": timestamp,
-        }
+        # Get cache performance summary
+        performance_summary = dpu.get_cache_performance_summary(user_id, device_id, hours)
         
-        # Check device status for inference processing
+        # Get storage stats
+        from utils.storage_management import StorageManager
+        storage_stats = StorageManager.get_storage_stats(user_id, device_id)
+        
+        # Get device current settings
         db = firestore.client()
         device_ref = db.collection("users").document(user_id).collection("devices").document(device_id)
         device_doc = device_ref.get()
         
+        current_settings = {}
         if device_doc.exists:
             device_data = device_doc.to_dict()
-            device_status = device_data.get("status", "Not Configured")
-            inference_mode = device_data.get("inferenceMode", "Detect")
-            
-            logger.info(f"Device {device_id} status: {device_status}, mode: {inference_mode}")
-            
-            # Only process inference if device is operational
-            if device_status == "Operational":
-                try:
-                    logger.info(f"Processing inference for operational device {device_id}")
-                    
-                    # Call inference function
-                    inference_result = inference(image_bytes, user_id, device_id)
-                    
-                    # Force garbage collection after inference processing
-                    gc.collect()
-
-                    if "error" not in inference_result:
-                        # Save inference output for dashboard and process notifications
-                        save_inference_output(user_id, device_id, inference_result, inference_mode)
-                        
-                        # Extract metrics for response
-                        clean_result = {k: v for k, v in inference_result.items() if k != "credit_usage"}
-                        primary_metric, class_metrics = extract_metrics_from_inference(clean_result, inference_mode)
-                        
-                        # Add inference data to response
-                        response_data.update({
-                            "inference_processed": True,
-                            "inference_mode": inference_mode,
-                            "model_used": inference_result.get("modelUsed", "unknown"),
-                            "credit_usage": inference_result.get("credit_usage", 0),
-                            "primary_metric": primary_metric,
-                            "total_detections": class_metrics.get("totalDetections", 0),
-                            "class_counts": class_metrics.get("classCounts", {}),
-                            "average_confidence": round(class_metrics.get("averageConfidence", 0.0), 3)
-                        })
-                        
-                        logger.info(f"Successfully processed inference: {primary_metric} detections, "
-                                  f"classes: {list(class_metrics.get('classCounts', {}).keys())}, "
-                                  f"credits used: {inference_result.get('credit_usage', 0)}")
-                        
-                    else:
-                        logger.error(f"Inference error for device {device_id}: {inference_result['error']}")
-                        response_data["inference_error"] = inference_result["error"]
-                        
-                except Exception as inference_error:
-                    logger.error(f"Exception during inference processing for device {device_id}: {str(inference_error)}")
-                    response_data["inference_error"] = str(inference_error)
-            else:
-                logger.info(f"Device {device_id} not operational (status: {device_status}), skipping inference")
-                response_data["device_status"] = device_status
-                response_data["inference_skipped"] = "Device not operational"
-        else:
-            logger.error(f"Device {device_id} not found in Firestore")
-            response_data["warning"] = "Device not found in database"
+            current_settings = {
+                'similarity_settings': dpu.get_device_similarity_settings(device_data),
+                'overlay_settings': dpu.get_device_overlay_settings(device_data),
+                'last_processing_metrics': device_data.get('lastProcessingMetrics', {}),
+                'cumulative_stats': device_data.get('cumulativeProcessingStats', {})
+            }
         
-        # Final garbage collection before returning
-        gc.collect()
-        return add_cors_headers(jsonify(response_data)), 200
-
+        response_data = {
+            'device_id': device_id,
+            'performance_summary': performance_summary,
+            'storage_stats': storage_stats,
+            'current_settings': current_settings,
+            'timestamp': int(time.time() * 1000)
+        }
+        
+        return add_cors_headers(jsonify(response_data))
+        
     except Exception as e:
-        logger.error(f"Error in receive_image: {str(e)}")
-        # Force garbage collection even on error
-        gc.collect()
+        logger.error(f"Error getting device performance metrics: {str(e)}")
         return add_cors_headers(jsonify({"error": str(e)})), 500
+
 
 def _parse_image_request(request) -> tuple:
     """
@@ -292,9 +559,9 @@ def device_heartbeat(request):
                 wifi_signal_strength = int(wifi_signal_strength)
                 # Validate reasonable RSSI range (-100 to 0 dBm)
                 if wifi_signal_strength < -100 or wifi_signal_strength > 0:
-                    logger.warning(f"WiFi signal strength out of expected range: {wifi_signal_strength} dBm")
+                    logger.info(f"WiFi signal strength out of expected range: {wifi_signal_strength} dBm")
             except (ValueError, TypeError):
-                logger.warning(f"Invalid WiFi signal strength format: {wifi_signal_strength}")
+                logger.info(f"Invalid WiFi signal strength format: {wifi_signal_strength}")
                 wifi_signal_strength = None
 
         # Normalize received camera ID (remove colons and convert to uppercase)
@@ -640,7 +907,7 @@ def inference(image_data, user_id, device_id):
                 # Default to the Moondream pipeline
                 result = run_moondream_inference(image_data, device_config)
         else:
-            logger.warning(f"Inference mode '{inference_mode}' is not 'Detect'. Defaulting to Moondream.")
+            logger.info(f"Inference mode '{inference_mode}' is not 'Detect'. Defaulting to Moondream.")
             result = run_moondream_inference(image_data, device_config)
 
         # Add metadata and return in the expected format
@@ -772,7 +1039,7 @@ def update_credit_usage(user_id: str, device_id: str, credit_usage: float) -> No
             
             logger.info(f"Updated device {device_id} credit usage: {current_device_credits} -> {new_device_credits}")
         else:
-            logger.warning(f"Device {device_id} not found for credit update")
+            logger.info(f"Device {device_id} not found for credit update")
         
         # Force a small delay and verify the update worked
         import time

@@ -5,6 +5,7 @@ functions-framework==3.*
 
 google-cloud-storage==2.*
 google-cloud-pubsub==2.*
+google-cloud-firestore>=2.0.0
 httpx>=0.27.0
 fastapi>=0.100.0 # Changed from 0.68.* for Pydantic v2 compatibility
 uvicorn==0.15.*
@@ -15,9 +16,19 @@ Flask==2.2.5
 # OpenAI Python client library to call the ChatGPT API.
 openai==1.61.1
 pydantic
-Pillow
+# Pillow
 uuid
 anthropic>=0.7.0
 moondream
 
 google-genai >= 0.1.0
+
+# Image Processing and Computer Vision
+opencv-python-headless==4.8.1.78
+scikit-image # ==0.21.0
+ImageHash==4.3.1
+Pillow #==10.0.1
+numpy # ==1.24.3
+
+# Optional: For enhanced performance monitoring
+psutil==5.9.5

@@ -62,11 +62,11 @@ class StorageManager:
                             image_files.append((blob.name, timestamp))
                             
                         except ValueError:
-                            logger.warning(f"Could not parse timestamp from filename: {filename}")
+                            logger.info(f"Could not parse timestamp from filename: {filename}")
                             continue
                     
                 except Exception as blob_error:
-                    logger.warning(f"Error processing blob {blob.name}: {str(blob_error)}")
+                    logger.info(f"Error processing blob {blob.name}: {str(blob_error)}")
                     continue
             
             # Sort by timestamp (oldest first)
@@ -141,7 +141,7 @@ class StorageManager:
                             logger.info(f"✅ Deleted: {blob_name}")
                         else:
                             failed_deletes.append(blob_name)
-                            logger.warning(f"❌ Failed to delete: {blob_name}")
+                            logger.info(f"❌ Failed to delete: {blob_name}")
                     except Exception as delete_error:
                         failed_deletes.append(blob_name)
                         logger.error(f"❌ Error deleting {blob_name}: {str(delete_error)}")
@@ -159,7 +159,7 @@ class StorageManager:
             }
             
             if failed_deletes:
-                logger.warning(f"Failed to delete {len(failed_deletes)} files: {failed_deletes[:3]}...")
+                logger.info(f"Failed to delete {len(failed_deletes)} files: {failed_deletes[:3]}...")
                 result["failed_files"] = failed_deletes
             
             logger.info(f"✅ Cleanup completed: {deleted_count}/{images_to_delete} deleted in {processing_time:.1f}ms")
@@ -191,7 +191,7 @@ class StorageManager:
                 blob.delete()
                 return True
             else:
-                logger.warning(f"Blob {blob_name} does not exist")
+                logger.info(f"Blob {blob_name} does not exist")
                 return True  # Consider non-existent blobs as "successfully deleted"
         except Exception as e:
             logger.error(f"Error deleting blob {blob_name}: {str(e)}")
@@ -230,7 +230,7 @@ class StorageManager:
                 image_bytes = blob.download_as_bytes()
                 return (latest_blob_name, image_bytes, latest_timestamp)
             else:
-                logger.warning(f"Latest image blob does not exist: {latest_blob_name}")
+                logger.info(f"Latest image blob does not exist: {latest_blob_name}")
                 return None
                 
         except Exception as e:
@@ -282,7 +282,7 @@ class StorageManager:
                 image_bytes = blob.download_as_bytes()
                 return (blob_name, image_bytes, timestamp)
             else:
-                logger.warning(f"Previous image blob does not exist: {blob_name}")
+                logger.info(f"Previous image blob does not exist: {blob_name}")
                 return None
                 
         except Exception as e:
@@ -337,7 +337,7 @@ class StorageManager:
                 except Exception as upload_error:
                     if attempt == max_retries - 1:
                         raise upload_error
-                    logger.warning(f"Upload attempt {attempt + 1} failed, retrying: {str(upload_error)}")
+                    logger.info(f"Upload attempt {attempt + 1} failed, retrying: {str(upload_error)}")
                     time.sleep(1)  # Brief delay before retry
             
             logger.info(f"✅ Saved processed image: {file_path} ({len(image_bytes)} bytes)")

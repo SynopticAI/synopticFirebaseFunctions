@@ -182,7 +182,7 @@ class ImageSimilarityCalculator:
                 # Weighted average: histogram (fast) + perceptual (accurate)
                 score = (hist_score * 0.6) + (perceptual_score * 0.4)
             else:
-                logger.warning(f"Unknown similarity method: {method}, defaulting to histogram")
+                logger.info(f"Unknown similarity method: {method}, defaulting to histogram")
                 score = ImageSimilarityCalculator.histogram_similarity(img1_bytes, img2_bytes)
                 method = "histogram"
         

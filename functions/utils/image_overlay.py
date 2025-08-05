@@ -108,7 +108,7 @@ class ImageOverlayProcessor:
                     
                     # Validate coordinates
                     if x1 >= x2 or y1 >= y2:
-                        logger.warning(f"Invalid bounding box coordinates for {class_name}: ({x1},{y1}) to ({x2},{y2})")
+                        logger.info(f"Invalid bounding box coordinates for {class_name}: ({x1},{y1}) to ({x2},{y2})")
                         continue
                     
                     # Scale coordinates to actual image size
@@ -265,7 +265,7 @@ class ImageOverlayProcessor:
                     
                     # Validate coordinates
                     if not (0 <= x <= 1 and 0 <= y <= 1):
-                        logger.warning(f"Point coordinates out of range: ({x}, {y})")
+                        logger.info(f"Point coordinates out of range: ({x}, {y})")
                         x = max(0, min(1, x))
                         y = max(0, min(1, y))
                     

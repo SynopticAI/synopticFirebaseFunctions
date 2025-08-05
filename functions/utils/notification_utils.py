@@ -303,7 +303,7 @@ def send_notification(trigger: NotificationTrigger) -> bool:
                         })
                         logger.info(f"Removed invalid token from device {trigger.device_id}")
                     except Exception as cleanup_error:
-                        logger.warning(f"Failed to remove invalid token: {cleanup_error}")
+                        logger.info(f"Failed to remove invalid token: {cleanup_error}")
         
         logger.info(f"Notification complete for device {trigger.device_id}: {successful_sends} successful, {failed_sends} failed")
         return successful_sends > 0
