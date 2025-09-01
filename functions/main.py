@@ -1480,15 +1480,25 @@ SETUP FLOW:
    - Update setupStage to 1.0
 
 RULES:
-- ONE key question maximum, then ACT
-- Use **bold** for important terms
-- Respond in {user_language}
+- ONE key question maximum, then ACT immediately
+- After taking actions, ALWAYS explain what you accomplished in 2-3 sentences
+- Guide users to their next step with specific instructions (button names, locations)
+- Use **bold** for important terms to improve readability for the User.
+- Respond in {user_language} with a helpful, goal-oriented tone
 - Use parallel function calls to set everything up at once
 - Default to "Detect" inference mode unless user specifically needs point detection
-- Don't ask about device names, inference modes, or technical details - just set sensible defaults
+- Don't ask about technical details - set sensible defaults and explain your choices
+
+POST-ACTION GUIDANCE:
+- Setup complete (stage 1.0): "Your device is configured! Test it using the **Test** button at the top."
+- Testing successful (stage 2.0): "Perfect! Your device is now operational and ready for monitoring."
+- Icon created: "I've also generated a custom icon based on your monitoring task."
+- Classes set: "I've configured detection classes: [list classes] - you can adjust these anytime in settings."
 
 Example: User says "monitor for defects on production line"
-→ Immediately set: name="Production Monitor", taskDescription="Defect Detection", mode="Detect", classes=["normal", "defect"]
+→ Call setupDevice with: name="Production Monitor", taskDescription="Defect Detection", mode="Detect", classes=["normal", "defect"]
+→ Response: "I've set up your **Production Monitor** for defect detection with classes 'normal' and 'defect', using **Detect** mode for accurate object identification. You can now test the detection by pressing the **Test** button at the top of this page!"
+
 
 Never modify: status, connectedCameraId, last_heartbeat, iconAlreadyCreated, deletionStarted"""
 
@@ -1638,19 +1648,34 @@ def assistant_chat(request: Request):
         # Build system prompt
         system_prompt = build_system_prompt(device_data, setup_stage, user_language)
         
+        # Extract conversation history from request
+        conversation_history = request_json.get("conversation_history", [])
+        
         # Handle different prompt types
         if prompt_type == "initial":
             # For initial setup, provide context but let the user start
+            # if setup_stage == 0 and not device_data.get('taskDescription'):
+            #     actual_message = "Hi! I'm here to help set up your monitoring device. What would you like me to monitor?"
             if setup_stage == 0 and not device_data.get('taskDescription'):
-                actual_message = "Hi! I'm here to help set up your monitoring device. What would you like me to monitor?"
+                actual_message = "Good day! I'm here to help set up your **monitoring device**. What would you like me to monitor? I could monitor **machine status**, **rough inventory levels**, or any other visual task you have in mind. Just describe what you need!"
             else:
                 actual_message = f"Welcome back! I see we're working on your {device_data.get('name', 'device')}. How can I help you continue the setup?"
         else:
             # For conversational, use the actual user message
             actual_message = user_message
         
-        # Prepare message content
-        contents = [actual_message]
+        # Build conversation thread with history
+        contents = []
+        
+        # Add conversation history (excluding action messages)
+        for msg in conversation_history:
+            if msg.get("role") == "user":
+                contents.append(f"User: {msg.get('content', '')}")
+            elif msg.get("role") == "assistant" and msg.get('content'):
+                contents.append(f"Assistant: {msg.get('content', '')}")
+        
+        # Add current message
+        contents.append(f"User: {actual_message}")
         
         # Handle image attachments
         image_timestamps = request_json.get("imageTimestamps", [])
