@@ -1675,7 +1675,8 @@ def assistant_chat(request: Request):
         client = genai.Client(api_key=get_gemini_api_key())
         
         response = client.models.generate_content(
-            model='models/gemini-2.0-flash-exp',
+            # model='models/gemini-2.5-flash',
+            model='models/gemini-2.5-flash',
             contents=contents,
             config=types.GenerateContentConfig(
                 tools=GEMINI_TOOLS,
