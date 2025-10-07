@@ -14,7 +14,7 @@
 
 from firebase_functions import storage_fn, https_fn, logger, pubsub_fn
 from firebase_admin import initialize_app, storage, firestore, credentials, messaging
-import tempfile
+# REMOVED TO CONSERVE RAM # import tempfile
 import os
 import requests
 import json
@@ -22,23 +22,23 @@ from google.cloud import storage, pubsub_v1
 import datetime
 import base64
 import time
-import gc
-from google.cloud import storage as gcs
+# REMOVED TO CONSERVE RAM # import gc
+# REMOVED TO CONSERVE RAM # from google.cloud import storage as gcs
 
 import re
 from firebase_functions import https_fn  # Use Firebase Functions' decorator
 from flask import Request, jsonify
 
 from pydantic import BaseModel
-import asyncio
+# REMOVED TO CONSERVE RAM # import asyncio
 
-import anthropic
+# REMOVED TO CONSERVE RAM # import anthropic
 import openai
 from openai import OpenAI
 from PIL import Image
 import io
-import uuid 
-import math
+# REMOVED TO CONSERVE RAM # import uuid 
+# REMOVED TO CONSERVE RAM # import math
 
 # Own imports
 from config.loader import get_openai_api_key, get_anthropic_api_key, get_gemini_api_key
@@ -80,9 +80,9 @@ openai_client = OpenAI(
 )
 openai.api_key = get_openai_api_key()
 
-client = anthropic.Anthropic(
-    api_key=get_anthropic_api_key(),
-)
+# REMOVED TO CONSERVE RAM # client = anthropic.Anthropic(
+# REMOVED TO CONSERVE RAM #     api_key=get_anthropic_api_key(),
+# REMOVED TO CONSERVE RAM # )
 
 cred = credentials.Certificate("aimanagerfirebasebackend-firebase-adminsdk-fbsvc-5977b3630b.json")
 initialize_app()
@@ -861,7 +861,7 @@ import io
 import base64
 import requests
 import json
-import concurrent.futures
+# REMOVED TO CONSERVE RAM # import concurrent.futures
 from firebase_functions import https_fn, logger
 from firebase_admin import firestore, storage
 import datetime
@@ -1198,7 +1198,7 @@ def update_device_settings(user_id: str, device_id: str, settings: dict) -> bool
             return False
 
         current_settings = device_doc.to_dict()
-        logger.info(f"Current device settings: {json.dumps(current_settings, indent=2)}")
+        # logger.info(f"Current device settings: {json.dumps(current_settings, indent=2)}")
 
         # First pass: collect all changes for validation
         proposed_updates = {}
@@ -1612,6 +1612,31 @@ def execute_function_call(func_name: str, func_args: dict, user_id: str, device_
             "timestamp": action_timestamp
         }
 
+def safely_extract_response_content(response):
+    """Safely extract content from Gemini response"""
+    try:
+        if not response or not hasattr(response, 'candidates'):
+            return None, "No response from model"
+            
+        if not response.candidates:
+            return None, "No candidates in response"
+            
+        candidate = response.candidates[0]
+        if not candidate or not hasattr(candidate, 'content'):
+            return None, "No content in candidate"
+            
+        content = candidate.content
+        if not content or not hasattr(content, 'parts'):
+            return None, "No parts in content"
+            
+        if not content.parts:
+            return None, "Empty parts in content"
+            
+        return content.parts, None
+        
+    except Exception as e:
+        return None, f"Error extracting content: {str(e)}"
+
 @https_fn.on_request(region="europe-west4")
 def assistant_chat(request: Request):
     """Simplified Gemini-based assistant chat"""
@@ -1711,34 +1736,40 @@ def assistant_chat(request: Request):
             )
         )
         
-        # Process response
+        # Process response safely
         assistant_reply = ""
         actions = []
         function_call_counter = 0
         
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'text') and part.text:
-                assistant_reply += part.text
-            elif hasattr(part, 'function_call') and part.function_call:
-                function_call_counter += 1
-                
-                # Execute function call
-                func_result = execute_function_call(
-                    part.function_call.name,
-                    dict(part.function_call.args),
-                    user_id,
-                    device_id,
-                    message_timestamp,
-                    function_call_counter
-                )
-                
-                # Create action entry for frontend
-                action_timestamp = func_result.get("timestamp", message_timestamp)
-                actions.append({
-                    "tool": part.function_call.name,
-                    "timestamp": action_timestamp,
-                    "result": func_result
-                })
+        parts, error = safely_extract_response_content(response)
+        if error:
+            logger.warning(f"Gemini response issue: {error}")
+            assistant_reply = "I'm having trouble generating a response. Please try again."
+        else:
+            # Safe to process parts
+            for part in parts:
+                if hasattr(part, 'text') and part.text:
+                    assistant_reply += part.text
+                elif hasattr(part, 'function_call') and part.function_call:
+                    function_call_counter += 1
+                    
+                    # Execute function call
+                    func_result = execute_function_call(
+                        part.function_call.name,
+                        dict(part.function_call.args),
+                        user_id,
+                        device_id,
+                        message_timestamp,
+                        function_call_counter
+                    )
+                    
+                    # Create action entry for frontend
+                    action_timestamp = func_result.get("timestamp", message_timestamp)
+                    actions.append({
+                        "tool": part.function_call.name,
+                        "timestamp": action_timestamp,
+                        "result": func_result
+                    })
         
         # Build response
         result = {

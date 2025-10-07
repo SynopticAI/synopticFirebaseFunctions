@@ -34,10 +34,11 @@ def add_cors_headers(response):
 
 def get_inference_similarity_threshold(device_data: Dict[str, Any]) -> float:
     """
-    Get simple similarity threshold (0.0-1.0) with default of 0.85.
+    Get simple similarity threshold (0.0-1.0) with default of 0.95.
     Only configurable setting - everything else uses system defaults.
     """
-    threshold = device_data.get('inferenceSimilarityThreshold', 0.85)
+    # threshold = device_data.get('inferenceSimilarityThreshold', 0.95)
+    threshold = device_data.get('inferenceSimilarityThreshold', 0.0) # SIMILARITY CHECK DISABLED
     return max(0.0, min(1.0, float(threshold)))
 
 def get_similarity_system_settings() -> Dict[str, Any]:
